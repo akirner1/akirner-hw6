@@ -13,6 +13,13 @@ ts_entry_t* initEntry(int key, int value){
   return entry;
 }
 
+void updateFields(ts_hashmap_t* map, int deltaSize){
+  pthread_mutex_t* lock = (map->locks)[map->capacity];
+  pthread_mutex_lock(lock);
+  map->size += deltaSize;
+  map->numOps ++;
+  pthread_mutex_unlock(lock);  
+}
 /**
  * Creates a new thread-safe hashmap. 
  *
@@ -26,10 +33,16 @@ ts_hashmap_t *initmap(int capacity) {
   map->size = 0;
   map->numOps = 0;
   map->table = malloc(capacity * sizeof(ts_entry_t*));
+  map->locks = malloc((1+capacity)*sizeof(pthread_mutex_t*));
   //set all the values to null, so we can tell which tables do and don't have entries.
   for(int i = 0; i < capacity; i++){
     (map->table)[i] = NULL;
+    (map->locks)[i] = malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init((map->locks)[i], NULL);
   }
+  //locks[capacity] is what i am calling the "opLock". It protects mutual exclusion in the numOps and size fields, as those cannot be protected on a per_thread basis.
+  (map->locks)[capacity] = malloc(sizeof(pthread_mutex_t));
+  pthread_mutex_init((map->locks)[capacity], NULL);
   return map;
 }
 /**
@@ -39,16 +52,23 @@ ts_hashmap_t *initmap(int capacity) {
  * @return the value associated with the given key, or INT_MAX if key not found
  */
 int get(ts_hashmap_t *map, int key) {
-  map->numOps++;
-  int location = key%(map->capacity);
-  ts_entry_t* entry = (map->table)[location];
+  //printf("starting get\n");
+  int location = key%(map->capacity); //non CS
+  pthread_mutex_t* lock = (map->locks)[location];
+  pthread_mutex_lock(lock);
+  ts_entry_t* entry = (map->table)[location]; //CS (stays in CS until entry has finished being written to)
   if(entry == NULL){
+    pthread_mutex_unlock(lock);
+    updateFields(map, 0);
     return INT_MAX;
   }
   while(entry->next != NULL){
     entry = entry->next;
   }
-  return entry->value;
+  pthread_mutex_unlock(lock);
+  updateFields(map, 0);
+  //printf("get complete\n");
+  return entry->value; //CS (kinda)
 
 }
 
@@ -60,12 +80,17 @@ int get(ts_hashmap_t *map, int key) {
  * @return old associated value, or INT_MAX if the key was new
  */
 int put(ts_hashmap_t *map, int key, int value) {
-  map->numOps++;
+  //printf("starting put\n");
   int location = key%(map->capacity);
+  pthread_mutex_t* lock = (map->locks)[location];
+  pthread_mutex_lock(lock);
   ts_entry_t* entry = (map->table)[location];
   if(entry == NULL){
     (map->table)[location] = initEntry(key, value);
     map->size ++;
+    pthread_mutex_unlock(lock);
+    updateFields(map, 1);
+    //printf("put complete\n");
     return INT_MAX;
   }
   while(1){
@@ -73,11 +98,17 @@ int put(ts_hashmap_t *map, int key, int value) {
       int oldVal = entry->value;
       entry->value = value;
       map->size ++;
+      pthread_mutex_unlock(lock);
+      updateFields(map, 1);
+      //printf("put complete\n");
       return oldVal;
     }
     if(entry->next == NULL){
       entry->next = initEntry(key, value);
       map->size ++;
+      pthread_mutex_unlock(lock);
+      updateFields(map, 1);
+      //printf("put complete\n");
       return INT_MAX;
     }
     entry = entry->next;
@@ -91,18 +122,25 @@ int put(ts_hashmap_t *map, int key, int value) {
  * @return the value associated with the given key, or INT_MAX if key not found
  */
 int del(ts_hashmap_t *map, int key) {
-  map->numOps++;
+  //printf("starting del\n");
   int location = key%(map->capacity);
+  pthread_mutex_t* lock = (map->locks)[location];
+  pthread_mutex_lock(lock);
   ts_entry_t* entry = (map->table)[location];
   int oldVal;
   if(entry == NULL){
+    pthread_mutex_unlock(lock);
+    updateFields(map, 0);
+    //printf("del complete\n");
     return INT_MAX;
   }
   if(entry -> key == key){
     oldVal = entry->value;
     (map->table)[location] = entry->next;
     free(entry);
-    map->size --;
+    pthread_mutex_unlock(lock);
+    updateFields(map, -1);
+    //printf("del complete\n");
     return oldVal;
   }
   ts_entry_t* previous;
@@ -113,10 +151,15 @@ int del(ts_hashmap_t *map, int key) {
       oldVal = entry->value;
       previous->next = entry->next;
       free(entry);
-      map->size --;
+      pthread_mutex_unlock(lock);
+      updateFields(map, -1);
+      //printf("del complete\n");
       return oldVal;
     }
   }
+  pthread_mutex_unlock(lock);
+  updateFields(map, 0);
+  //printf("del complete\n");
   return INT_MAX;
 }
 
@@ -152,7 +195,10 @@ void freeMap(ts_hashmap_t *map) {
       entry = entry->next;
       free(old);
     }
+    pthread_mutex_destroy((map->locks)[i]);
   }
+  free((map->locks)[map->capacity]);
+  free(map->locks);
   free(map->table);
   free(map);
   // TODO: iterate through each list, free up all nodes

@@ -48,6 +48,7 @@ int main(int argc, char *argv[]) {
 	// initialize map
 	map = initmap(capacity);
 
+
 	// start clocking!
 	startTime = rtclock();
 
