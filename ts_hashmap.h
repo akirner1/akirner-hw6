@@ -17,6 +17,8 @@ typedef struct ts_hashmap_t {
    int capacity;
    int size;
    pthread_mutex_t **locks;
+   int isRehashing;
+   pthread_spinlock_t *lock;
 } ts_hashmap_t;
 
 // function declarations

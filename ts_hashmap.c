@@ -5,20 +5,106 @@
 #include <string.h>
 #include "ts_hashmap.h"
 
+ts_entry_t* detatchHead(ts_entry_t* entry){
+  //printf("entering head datatch fn\n");
+  if(entry == NULL){
+    printf("BAD\n");
+  }
+  ts_entry_t* head = entry;
+  entry = head->next;
+  head->next = NULL;
+  //printf("leaving\n");
+  return head;
+
+}
+
+void rehash(ts_hashmap_t* map, int newCapacity){
+  printf("rehashing\n");
+  map->isRehashing = 1;
+  for(int i = 0; i < map->capacity; i++){
+    pthread_mutex_lock((map->locks)[i]);
+  }
+  printf("acquired all locks\n");
+  ts_entry_t** oldTable = map->table;
+  map->table = malloc(newCapacity * sizeof(ts_entry_t*));
+  for(int i = 0; i < newCapacity; i++){
+    (map->table)[i] = malloc(sizeof(ts_entry_t));
+    (map->table)[i] = NULL;
+  }
+  printf("created new table\n");
+  for(int i = 0; i < map->capacity; i++){
+    ts_entry_t* current = oldTable[i];
+    //printf("acquired head %d\n", i);
+    while(current != NULL){
+      ts_entry_t* temp = current->next;
+      ts_entry_t* head = detatchHead(current);
+      current = temp;
+      int newLocation = (head->key) % newCapacity;
+      //printf("finding location\n");
+      ts_entry_t** table = (map->table);
+      //printf("new location: %d. Array size: %d, key: %d\n", newLocation, newCapacity, head->key);
+      ts_entry_t* target = table[newLocation];
+      //printf("found location\n");
+      if(target == NULL){
+        target = head;
+      }else{
+        while(target->next != NULL){
+          target = target->next;
+        }
+        target->next = head;
+      }
+    }
+  }
+  printf("all entries placed\n");
+  pthread_mutex_t** oldLocks = map->locks;
+  map->locks = malloc(newCapacity * sizeof(pthread_mutex_t*));
+  for(int i = 0; i < map->capacity; i++){
+    //if(i < newCapacity){
+      (map->locks)[i] = oldLocks[i];
+      pthread_mutex_unlock((map->locks)[i]);
+    //}else{
+    //  pthread_mutex_destroy(oldLocks[i]); //destroy extra locks if the capacity shrunk
+    //}
+  }
+  printf("existing locks done\n");
+  //printf("i = %d, i ends at: %d\n", map->capacity, newCapacity);
+  //starting from where the locks left off
+  for(int i = map->capacity; i < newCapacity; i++){
+    //printf("%d\n", i);
+    (map->locks)[i] = malloc(sizeof(pthread_mutex_t));
+    pthread_mutex_init((map->locks)[i], NULL);
+  }
+  printf("new locks done\n");
+  map->capacity = newCapacity;
+  free(oldLocks);
+  free(oldTable);
+  map->isRehashing = 0;
+  printf("done rehashing\n");
+}
 ts_entry_t* initEntry(int key, int value){
+  printf("initEntry\n");
   ts_entry_t* entry = malloc(sizeof(ts_entry_t));
+  printf("malloc good\n");
   entry->key = key;
   entry->value = value;
   entry->next = NULL;
+  printf("done\n");
   return entry;
 }
 
 void updateFields(ts_hashmap_t* map, int deltaSize){
-  pthread_mutex_t* lock = (map->locks)[map->capacity];
-  pthread_mutex_lock(lock);
+  pthread_spin_lock(map->lock);
   map->size += deltaSize;
   map->numOps ++;
-  pthread_mutex_unlock(lock);  
+  double load = ((double)map->size)/((double)map->capacity);
+  if(load >= 0.75){
+    //printf("load is %.3f. Size is %d, cap is %d\n", load, map->size, map->capacity);
+    //rehash(map, map->capacity * 2);
+  //}if(load <= 0.1 && deltaSize < 0){
+    rehash(map, map->capacity / 2);
+  }
+
+  pthread_spin_unlock(map->lock);
 }
 /**
  * Creates a new thread-safe hashmap. 
@@ -33,16 +119,16 @@ ts_hashmap_t *initmap(int capacity) {
   map->size = 0;
   map->numOps = 0;
   map->table = malloc(capacity * sizeof(ts_entry_t*));
-  map->locks = malloc((1+capacity)*sizeof(pthread_mutex_t*));
+  map->locks = malloc((capacity)*sizeof(pthread_mutex_t*));
+  map->isRehashing = 0; //0 if not rehasing, 1 if rehashing
+  map->lock = malloc(sizeof(pthread_spinlock_t));
+  pthread_spin_init(map->lock, PTHREAD_PROCESS_PRIVATE);
   //set all the values to null, so we can tell which tables do and don't have entries.
   for(int i = 0; i < capacity; i++){
     (map->table)[i] = NULL;
     (map->locks)[i] = malloc(sizeof(pthread_mutex_t));
     pthread_mutex_init((map->locks)[i], NULL);
   }
-  //locks[capacity] is what i am calling the "opLock". It protects mutual exclusion in the numOps and size fields, as those cannot be protected on a per_thread basis.
-  (map->locks)[capacity] = malloc(sizeof(pthread_mutex_t));
-  pthread_mutex_init((map->locks)[capacity], NULL);
   return map;
 }
 /**
@@ -52,6 +138,9 @@ ts_hashmap_t *initmap(int capacity) {
  * @return the value associated with the given key, or INT_MAX if key not found
  */
 int get(ts_hashmap_t *map, int key) {
+  while(map->isRehashing){
+    ;
+  }
   //printf("starting get\n");
   int location = key%(map->capacity); //non CS
   pthread_mutex_t* lock = (map->locks)[location];
@@ -80,6 +169,9 @@ int get(ts_hashmap_t *map, int key) {
  * @return old associated value, or INT_MAX if the key was new
  */
 int put(ts_hashmap_t *map, int key, int value) {
+  while(map->isRehashing){
+    ;
+  }
   //printf("starting put\n");
   int location = key%(map->capacity);
   pthread_mutex_t* lock = (map->locks)[location];
@@ -122,6 +214,9 @@ int put(ts_hashmap_t *map, int key, int value) {
  * @return the value associated with the given key, or INT_MAX if key not found
  */
 int del(ts_hashmap_t *map, int key) {
+  while(map->isRehashing){
+    ;
+  }
   //printf("starting del\n");
   int location = key%(map->capacity);
   pthread_mutex_t* lock = (map->locks)[location];
