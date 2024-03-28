@@ -14,11 +14,10 @@ ts_entry_t* initEntry(int key, int value){
 }
 
 void updateFields(ts_hashmap_t* map, int deltaSize){
-  pthread_mutex_t* lock = (map->locks)[map->capacity];
-  pthread_mutex_lock(lock);
+  pthread_spin_lock(map->lock);
   map->size += deltaSize;
   map->numOps ++;
-  pthread_mutex_unlock(lock);  
+  pthread_spin_unlock(map->lock);  
 }
 /**
  * Creates a new thread-safe hashmap. 
@@ -33,7 +32,7 @@ ts_hashmap_t *initmap(int capacity) {
   map->size = 0;
   map->numOps = 0;
   map->table = malloc(capacity * sizeof(ts_entry_t*));
-  map->locks = malloc((1+capacity)*sizeof(pthread_mutex_t*));
+  map->locks = malloc((capacity)*sizeof(pthread_mutex_t*));
   //set all the values to null, so we can tell which tables do and don't have entries.
   for(int i = 0; i < capacity; i++){
     (map->table)[i] = NULL;
@@ -41,8 +40,8 @@ ts_hashmap_t *initmap(int capacity) {
     pthread_mutex_init((map->locks)[i], NULL);
   }
   //locks[capacity] is what i am calling the "opLock". It protects mutual exclusion in the numOps and size fields, as those cannot be protected on a per_thread basis.
-  (map->locks)[capacity] = malloc(sizeof(pthread_mutex_t));
-  pthread_mutex_init((map->locks)[capacity], NULL);
+  map->lock = malloc(sizeof(pthread_mutex_t));
+  pthread_spin_init(map->lock, PTHREAD_PROCESS_PRIVATE);
   return map;
 }
 /**
